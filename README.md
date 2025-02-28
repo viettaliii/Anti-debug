@@ -25,3 +25,5 @@ Dự án này tôi viết ra nhằm tìm hiểu phân tích các thủ thuật a
 
 1. [Anti-Debug Tricks - check point research](https://anti-debug.checkpoint.com/)
 2. [MaLAPI.io](https://malapi.io/#)
+3. [@v13td0x](https://hackmd.io/@v13td0x)
+4. [apriorit - Anti Debugging Protection Techniques with Examples](https://www.apriorit.com/dev-blog/367-anti-reverse-engineering-protection-techniques-to-use-before-releasing-software)
