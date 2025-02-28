@@ -70,7 +70,9 @@ Dưới đây là hình ảnh code assembly mở bằng IDA pro:
 Hàm `IsDebuggerPresent` được gọi để kiểm tra xem có debugger nào đang gắn vào không.
 Kết quả được kiểm tra, nếu phát hiện debugger (`eax` khác không), mã sẽ nhảy đến một vị trí cụ thể để xử lý trường hợp này.
 
-#### Các cách bypass
+#### 1.1.n. Bypass
+
+Đặt cờ BeingDebugged trong Process Environment Block (PEB) về 0.
 
 ##### 1. `Patching (sửa đổi)` mã nhị phân
 
@@ -107,9 +109,9 @@ __kernel_entry NTSTATUS NtQueryInformationProcess(
 );
 ```
 
-#### 1.3.1. [ProcessDebugPort](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryinformationprocess#PROCESSDEBUGPORT)
+#### 1.3.1. ProcessDebugPort
 
-Trong số nhiều thông tin có thể truy xuất bằng ntdll!NtQueryInformationProcess(), một thông tin đặc biệt quan trọng trong an ninh mạng là số cổng gỡ lỗi của tiến trình. Sử dụng lớp (class) ProcessDebugPort, một giá trị DWORD sẽ được trả về. Nếu tiến trình đang bị gỡ lỗi (debugged), giá trị DWORD này sẽ bằng 0xFFFFFFFF (tương đương với số thập phân -1). Việc phát hiện giá trị này có thể là một dấu hiệu cảnh báo cho thấy tiến trình đang bị theo dõi và phân tích, từ đó kích hoạt các biện pháp phòng vệ cần thiết.
+Trong số nhiều thông tin có thể truy xuất bằng ntdll!NtQueryInformationProcess(), một thông tin đặc biệt quan trọng trong an ninh mạng là số cổng gỡ lỗi của tiến trình. Sử dụng lớp (class) [ProcessDebugPort](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryinformationprocess#PROCESSDEBUGPORT), một giá trị DWORD sẽ được trả về. Nếu tiến trình đang bị gỡ lỗi (debugged), giá trị DWORD này sẽ bằng 0xFFFFFFFF (tương đương với số thập phân -1). Việc phát hiện giá trị này có thể là một dấu hiệu cảnh báo cho thấy tiến trình đang bị theo dõi và phân tích, từ đó kích hoạt các biện pháp phòng vệ cần thiết.
 
 Đoạn mẫu code C/C++ sau sử dụng kỹ thuật này:
 
@@ -251,7 +253,7 @@ int main() {
 }
 ```
 
-##### 1.3.3. ProcessDebugObjectHandle
+#### 1.3.3. ProcessDebugObjectHandle
 
 Khi quá trình gỡ lỗi bắt đầu, một đối tượng kernel được gọi là "debug object" (đối tượng gỡ lỗi) sẽ được tạo ra. Có thể truy vấn giá trị của handle (điểm điều khiển) này bằng cách sử dụng lớp `ProcessDebugObjectHandle` (0x1e) không được ghi chép chính thức.
 
@@ -320,3 +322,125 @@ int main() {
     return 0;
 }
 ```
+
+#### 1.3.n. Bypass
+
+Vì `CheckRemoteDebuggerPresent()` gọi `NtQueryInformationProcess()`, cách duy nhất là hook `NtQueryInformationProcess()` và đặt các giá trị sau trong buffer trả về:
+
+- 0 (hoặc bất kỳ giá trị nào trừ -1) cho truy vấn `ProcessDebugPort`.
+- Giá trị khác 0 cho truy vấn `ProcessDebugFlags`.
+- 0 cho truy vấn `ProcessDebugObjectHandle`.
+
+### 1.4. RtlQueryProcessHeapInformation()
+
+Hàm `ntdll!RtlQueryProcessHeapInformation()` có thể được sử dụng để đọc các heap flags (cờ heap) từ bộ nhớ tiến trình của tiến trình hiện tại.
+
+```c++
+bool Check() {
+    ntdll::PDEBUG_BUFFER pDebugBuffer = ntdll::RtlCreateQueryDebugBuffer(0, FALSE); // Tạo debug buffer.
+    if (!pDebugBuffer) return false; // Lỗi tạo buffer -> không debug.
+
+    if (!SUCCEEDED(ntdll::RtlQueryProcessHeapInformation((ntdll::PRTL_DEBUG_INFORMATION)pDebugBuffer))) { // Lấy thông tin heap.
+        // RtlFreeQueryDebugBuffer(pDebugBuffer); // Giải phóng buffer (quan trọng!)
+        return false; // Lỗi lấy thông tin -> không debug.
+    }
+
+    ULONG dwFlags = ((ntdll::PRTL_PROCESS_HEAPS)pDebugBuffer->HeapInformation)->Heaps[0].Flags; // Lấy flags của heap.
+    bool isDebugging = (dwFlags & ~HEAP_GROWABLE); // Kiểm tra HEAP_GROWABLE flag (tắt -> có thể debug).
+
+    // RtlFreeQueryDebugBuffer(pDebugBuffer); // Giải phóng buffer (quan trọng!)
+    return isDebugging; // Trả về kết quả kiểm tra.
+}
+```
+
+#### 1.4.n Bypass
+
+Cách duy nhất để giảm thiểu các kiểm tra này là hook các hàm và sửa đổi giá trị trả về cho `RtlQueryProcessHeapInformation()`:
+
+- Đặt `RTL_PROCESS_HEAPS::HeapInformation::Heaps::Flags` thành `HEAP_GROWABLE`
+
+### 1.5. RtlQueryProcessDebugInformation()
+
+Hàm ntdll!`RtlQueryProcessDebugInformation()` có thể được sử dụng để đọc một số trường nhất định từ bộ nhớ của quá trình được yêu cầu, bao gồm cả các cờ heap.
+
+Cách hoạt động của `RtlQueryProcessDebugInformation`
+
+- Hàm này cho phép truy vấn thông tin debug của một quá trình cụ thể.
+- Nó có thể đọc nhiều loại thông tin khác nhau, được xác định bởi các cờ truyền vào.
+- Đặc biệt, nó có thể đọc thông tin về heap của quá trình, bao gồm các cờ heap.
+
+```c++
+bool Check()
+{
+    // Tạo một buffer để lưu thông tin debug
+    ntdll::PDEBUG_BUFFER pDebugBuffer = ntdll::RtlCreateQueryDebugBuffer(0, FALSE);
+    
+    // Truy vấn thông tin debug của process hiện tại
+    if (!SUCCEEDED(ntdll::RtlQueryProcessDebugInformation(
+        GetCurrentProcessId(),           // ID của process hiện tại
+        ntdll::PDI_HEAPS | ntdll::PDI_HEAP_BLOCKS,  // Flags chỉ định loại thông tin cần truy vấn
+        pDebugBuffer)))                  // Buffer để lưu kết quả
+    {
+        return false;  // Trả về false nếu truy vấn thất bại
+    }
+
+    // Lấy flags của heap đầu tiên
+    ULONG dwFlags = ((ntdll::PRTL_PROCESS_HEAPS)pDebugBuffer->HeapInformation)->Heaps[0].Flags;
+    
+    // Kiểm tra xem có bất kỳ flag nào khác HEAP_GROWABLE không
+    return dwFlags & ~HEAP_GROWABLE;
+}
+
+```
+
+#### 1.5.n Bypass
+
+Cách duy nhất để giảm thiểu các kiểm tra này là hook các hàm và sửa đổi giá trị trả về cho `RtlQueryProcessDebugInformation()`:
+
+- Đặt `RTL_PROCESS_HEAPS::HeapInformation::Heaps::Flags` thành `HEAP_GROWABLE`
+
+### 1.6. NtQuerySystemInformation()
+
+Hàm `ntdll!NtQuerySystemInformation()` chấp nhận một tham số xác định lớp thông tin cần truy vấn. Phần lớn các lớp này không được ghi chép đầy đủ. Trong số đó có lớp `SystemKernelDebuggerInformation` (0x23), tồn tại từ thời Windows NT. Lớp này trả về giá trị của hai cờ:
+
+- `KdDebuggerEnabled` trong al
+- `KdDebuggerNotPresent` trong ah
+
+Do đó, giá trị trả về trong ah sẽ bằng 0 nếu có kernel debugger hiện diện.
+
+```c++
+// Định nghĩa hằng số cho lớp thông tin SystemKernelDebuggerInformation
+enum { SystemKernelDebuggerInformation = 0x23 };
+
+// Định nghĩa cấu trúc để lưu trữ thông tin về kernel debugger
+typedef struct _SYSTEM_KERNEL_DEBUGGER_INFORMATION { 
+    BOOLEAN DebuggerEnabled;      // Cờ cho biết debugger có được kích hoạt không
+    BOOLEAN DebuggerNotPresent;   // Cờ cho biết debugger có hiện diện không
+} SYSTEM_KERNEL_DEBUGGER_INFORMATION, *PSYSTEM_KERNEL_DEBUGGER_INFORMATION; 
+
+// Hàm kiểm tra sự hiện diện của kernel debugger
+bool Check()
+{
+    NTSTATUS status;
+    SYSTEM_KERNEL_DEBUGGER_INFORMATION SystemInfo;
+    
+    // Gọi hàm NtQuerySystemInformation để lấy thông tin về kernel debugger
+    status = NtQuerySystemInformation(
+        (SYSTEM_INFORMATION_CLASS)SystemKernelDebuggerInformation,
+        &SystemInfo,
+        sizeof(SystemInfo),
+        NULL);
+
+    // Kiểm tra kết quả và trả về true nếu kernel debugger hiện diện
+    return SUCCEEDED(status)
+        ? (SystemInfo.DebuggerEnabled && !SystemInfo.DebuggerNotPresent)
+        : false;
+}
+```
+
+#### 1.6.n Bypass
+
+Cách duy nhất để giảm thiểu các kiểm tra này là hook các hàm và sửa đổi giá trị trả về cho `NtQuerySystemInformation()` trong trường hợp truy vấn `SystemKernelDebuggerInformation`:
+
+- Đặt `SYSTEM_KERNEL_DEBUGGER_INFORMATION::DebuggerEnabled` thành 0
+- Đặt `SYSTEM_KERNEL_DEBUGGER_INFORMATION::DebuggerNotPresent` thành 1
